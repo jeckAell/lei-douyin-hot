@@ -240,7 +240,8 @@ def check_table_exists(ws_url):
             var firstTd = row.querySelector('td');
             if (!firstTd) continue;
             var txt = firstTd.textContent.trim();
-            if (/^\d+$/.test(txt)) {
+            // 排名列可能是数字也可能是空（Rank 1/2/3 为空）
+            if (txt === '' || /^\d+$/.test(txt)) {
                 validRows.push(row);
             }
         }
@@ -258,9 +259,10 @@ def check_table_exists(ws_url):
 
 def get_video_row_info(ws_url, row_index):
     """
-    在 douhot 页面上定位第 row_index 个视频行，返回其 '查看' 按钮的中心坐标。
-    策略：查找所有 <tr>，其第一个 <td> 包含数字（排名），取最后一个 <td> 内的按钮。
-    返回 dict: {x, y} 或 None
+    在 douhot 页面上定位第 row_index 个有效视频行（第一个 td 是纯数字或空的 tr），
+    返回其 '查看' 按钮的中心坐标。
+    注意：Rank 1/2/3 的排名列为空，其 rank 值按顺序推算。
+    返回 dict: {x, y, rank} 或 None
     """
     js = f'''
     (function() {{
@@ -270,25 +272,28 @@ def get_video_row_info(ws_url, row_index):
             var firstTd = row.querySelector('td');
             if (!firstTd) continue;
             var txt = firstTd.textContent.trim();
-            if (/^\\d+$/.test(txt)) {{
+            // 排名列可能是数字（如 "04"）也可能是空（如 Rank 1/2/3）
+            if (txt === '' || /^\\d+$/.test(txt)) {{
                 validRows.push(row);
             }}
         }}
         if (validRows.length <= {row_index}) {{
-            return JSON.stringify({{ error: 'row not found', total: validRows.length }});
+            return JSON.stringify({{ error: 'row not found', total: validRows.length, requested: {row_index} }});
         }}
         var targetRow = validRows[{row_index}];
-        // 找最后一个 td 里的按钮
+        var firstTd = targetRow.querySelector('td');
+        var firstTdText = firstTd ? firstTd.textContent.trim() : '';
+        // 排名列数字：如果有值就解析，否则按顺序推算（rowIndex 0=rank1, 1=rank2...）
+        var rankNum = firstTdText !== '' ? parseInt(firstTdText, 10) : {row_index} + 1;
         var tds = targetRow.querySelectorAll('td');
         var lastTd = tds[tds.length - 1];
         var btn = lastTd.querySelector('button') || lastTd.querySelector('a') || lastTd;
-        if (!btn) return JSON.stringify({{ error: 'no button in last td' }});
-
+        if (!btn) return JSON.stringify({{ error: 'no button in last td', rank: rankNum }});
         btn.scrollIntoView({{ behavior: 'instant', block: 'center' }});
         var rect = btn.getBoundingClientRect();
         var x = rect.left + rect.width / 2;
         var y = rect.top + rect.height / 2;
-        return JSON.stringify({{ x: x, y: y, text: btn.textContent.trim() }});
+        return JSON.stringify({{ x: x, y: y, text: btn.textContent.trim(), rank: rankNum }});
     }})()
     '''
     try:
@@ -396,24 +401,38 @@ def main():
     video_urls = []  # 存储所有视频链接
     ws_url = get_target_ws_url('douhot')  # 保持 douhot 页面焦点
 
+    # 正式开始采集前，先确保表格加载好（最多刷新5次）
+    print(f'\n[Step 7a] 检查表格是否加载...')
+    table_count = check_table_exists(ws_url)
+    if table_count == 0:
+        print(f'   ⚠️ 未识别到表格，尝试刷新页面（最多5次）...')
+        for retry in range(5):
+            cdp_js('window.scrollTo(0, 0)', 'douhot')
+            wait_for_load(1)
+            cdp_js('location.reload()', 'douhot')
+            wait_for_load(5)
+            ws_url = get_target_ws_url('douhot')
+            table_count = check_table_exists(ws_url)
+            print(f'   刷新 {retry+1}/5，表格行数: {table_count}')
+            if table_count > 0:
+                break
+        if table_count == 0:
+            print('   ❌ 刷新5次后仍未识别到表格，退出脚本')
+            close_browser()
+            sys.exit(1)
+    print(f'   ✅ 表格已加载，共 {table_count} 行')
+
     for i in range(MAX_VIDEOS):
         print(f'\n--- 第 {i+1}/{MAX_VIDEOS} 条视频 ---')
 
-        # 7a. 找到第 i 个视频行的查看按钮（带表格检查和刷新重试）
-        row_info = None
-        table_count = check_table_exists(ws_url)
-        if table_count == 0:
-            print(f'   ⚠️ 未识别到表格，尝试刷新页面...')
-            for retry in range(5):
-                cdp_js('location.reload()', 'douhot')
-                wait_for_load(5)
-                table_count = check_table_exists(ws_url)
-                print(f'   刷新重试 {retry+1}/5，表格行数: {table_count}')
-                if table_count > 0:
-                    break
-            if table_count == 0:
-                print('   ⚠️ 刷新5次后仍未识别到表格，跳过')
-                continue
+        # 每次循环开始时，先滚动到页面顶部，确保从头开始处理
+        cdp_js('window.scrollTo(0, 0)', 'douhot')
+        wait_for_load(2)
+
+        # 确认表格行数是否足够
+        if table_count <= i:
+            print(f'   ⚠️ 表格只有 {table_count} 行，无法获取第 {i+1} 行，跳过')
+            continue
 
         row_info = get_video_row_info(ws_url, i)
 
@@ -426,6 +445,8 @@ def main():
             if row_info is None or 'error' in row_info:
                 print('   ⚠️ 重试仍失败，跳过')
                 continue
+
+        print(f'   ✅ 成功定位第 {row_info.get("rank", "?")} 名，按钮: {row_info.get("text", "")}')
 
         x = row_info.get('x')
         y = row_info.get('y')

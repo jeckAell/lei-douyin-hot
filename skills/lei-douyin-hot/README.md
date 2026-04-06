@@ -69,3 +69,10 @@ https://douhot.douyin.com/square/hotspot?active_tab=hotspot_video&date_window=1&
 # 每天早上8点自动爬取
 0 8 * * * /bin/bash -c 'bash ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/start_douyin.sh && sleep 5 && python3 ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/hot_trending.py' >> ~/.openclaw/workspace/douyin_hot/cron.log 2>&1
 ```
+
+## 版本历史
+
+- **v1.4.0**: 修复 Rank 1/2/3 无法采集问题（排名列为空），修复 start.sh 启动阻塞导致 analyze 阶段超时
+- **v1.2.0**: URL 参数化（AI原生影像分类 first_tag=643），新增 douhot_page.png 页面截图
+- **v1.1.0**: 使用 ms-playwright Chromium，新增 analyze_video.py 视频分析
+- **v1.0.0**: 初始版本，使用系统 Firefox
