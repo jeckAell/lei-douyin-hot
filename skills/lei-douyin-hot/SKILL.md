@@ -1,7 +1,7 @@
 ---
 name: lei-douyin-hot
 description: 抖音热点中心自动爬取 - 通过 Chrome Debug 模式自动抓取抖音热点视频榜前10条视频，提取视频数据保存到 scripts.json，支持每日定时任务。
-version: 1.4.0
+version: 1.5.1
 required_permissions:
   - shell
 ---
@@ -94,8 +94,12 @@ hot_trending.py 自动启动 Chrome（9223）
 
 **目标 URL**（已包含分类参数）:
 ```
-https://douhot.douyin.com/square/hotspot?active_tab=hotspot_video&date_window=1&first_tag=643&second_tag=64301x64302&sub_type=1002
+https://douhot.douyin.com/square/hotspot?active_tab=hotspot_video&date_window=24&first_tag=643&second_tag=64301x64302&sub_type=1002
 ```
+
+**date_window 参数说明**:
+- `24` = 近1天（默认）
+- `1` = 近1小时（当1天无数据时自动切换）
 
 **数据格式**:
 ```json
@@ -175,6 +179,8 @@ cat ~/.openclaw/workspace/doubao/sheet/scripts/data/scripts.json | python3 -m js
 
 ## 版本历史
 
+- **v1.5.1**: 修复 Chrome 启动（改用 nohup + xvfb-run）
+- **v1.5.0**: 默认 date_window=24（1天），无数据时自动切换到 date_window=1（1小时）
 - **v1.4.0**: 修复 Rank 1/2/3 无法采集问题（排名列为空），修复 start.sh 启动阻塞导致 analyze 阶段超时
 - **v1.2.0**: URL 参数化（AI原生影像分类 first_tag=643），新增 douhot_page.png 页面截图
 - **v1.1.0**: 使用 ms-playwright Chromium，新增 analyze_video.py 视频分析

@@ -5,7 +5,7 @@
 用法: python3 hot_trending.py
 """
 
-import subprocess, json, sys, time, os, re, http.client, asyncio, websockets
+import subprocess, json, sys, time, os, re, http.client, asyncio, websockets, argparse
 
 CDP_HOST = '127.0.0.1'
 CDP_PORT = 9223  # 专属端口，不与主 CDP 冲突
@@ -14,7 +14,19 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ANALYZE_SCRIPT_DIR = '/home/lei/.openclaw/workspace/skills/lei-doubao-browser/scripts'
 ANALYZE_CDP_PORT = 9222
 MAX_VIDEOS = 10
-DOUHOT_URL = 'https://douhot.douyin.com/square/hotspot?active_tab=hotspot_video&date_window=1&first_tag=643&second_tag=64301x64302&sub_type=1002'
+DOUHOT_URL_DEFAULT = 24  # 默认24小时
+DOUHOT_URL_FALLBACK = 1   # 无数据时回退到1小时
+DOUHOT_URL_TEMPLATE = 'https://douhot.douyin.com/square/hotspot?active_tab=hotspot_video&date_window={date_window}&first_tag=643&second_tag=64301x64302&sub_type=1002'
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='抖音热点中心爬取脚本')
+    parser.add_argument('--headed', action='store_true', help='测试模式：使用有头浏览器（不启用 xvfb-run）')
+    return parser.parse_args()
+
+
+def build_douhot_url(date_window):
+    return DOUHOT_URL_TEMPLATE.format(date_window=date_window)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +89,20 @@ async def _cdp_send_raw(ws_url, method, params=None, timeout=15):
         await ws.send(json.dumps({'id': msg_id, 'method': method, 'params': params or {}}))
         r = await asyncio.wait_for(ws.recv(), timeout=timeout)
         return json.loads(r)
+
+
+async def _cdp_screenshot(filepath):
+    """截取当前页面并保存为 PNG"""
+    import base64
+    ws_url = get_target_ws_url('douhot')
+    if not ws_url:
+        return
+    result = await _cdp_send_raw(ws_url, 'Page.captureScreenshot', {'format': 'png'}, timeout=30)
+    if 'result' in result and 'data' in result['result']:
+        img_data = base64.b64decode(result['result']['data'])
+        with open(filepath, 'wb') as f:
+            f.write(img_data)
+        print(f'   📸 截图已保存: {filepath}')
 
 
 def cdp_js(js_code, target_keyword=None):
@@ -330,8 +356,13 @@ def extract_video_id(url):
 # ---------------------------------------------------------------------------
 
 def main():
+    args = parse_args()
+    headed = args.headed
+
     print('=' * 50)
     print('🚀 抖音热点中心爬取脚本')
+    if headed:
+        print('   [测试模式: 有头浏览器]')
     print('=' * 50)
 
     # 1. 检查/启动专属 Chrome（端口 9223）
@@ -343,7 +374,8 @@ def main():
     # 杀掉已有实例
     subprocess.run(['pkill', '-f', 'chrome.*9223'], stderr=subprocess.DEVNULL)
     time.sleep(1)
-    subprocess.Popen([
+    # 使用 nohup 启动 Chrome（避免被 SIGTERM/SIGKILL 杀掉）
+    chrome_cmd = [
         chrome_path,
         '--remote-debugging-port=9223',
         '--user-data-dir=' + user_data,
@@ -359,7 +391,16 @@ def main():
         '--metrics-recording-only',
         '--mute-audio',
         '--no-default-browser-check'
-    ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    ]
+    if not headed:
+        chrome_cmd.insert(0, 'xvfb-run')
+        chrome_cmd.insert(1, '-a')
+    with open('/tmp/chrome-hot.log', 'a') as f:
+        subprocess.Popen(
+            ['nohup'] + chrome_cmd,
+            stdout=f, stderr=f,
+            start_new_session=True
+        )
     time.sleep(5)
     if not check_chrome():
         print('❌ Chrome 启动失败')
@@ -369,9 +410,12 @@ def main():
     # 2. 登录状态通过 user-data-dir 保持，跳过检测
     print('\n[Step 2] 跳过登录检测（使用专属 Chrome，数据持久化）')
 
-    # 3. 打开 douhot 热点页面
-    print(f'\n[Step 3] 打开 {DOUHOT_URL} ...')
-    result = cdp_navigate(DOUHOT_URL)
+    # 3. 打开 douhot 热点页面（默认24小时，如无数据则切换1小时）
+    date_window = DOUHOT_URL_DEFAULT
+    douhot_url = build_douhot_url(date_window)
+    print(f'\n[Step 3] 打开 douhot 热点页面（date_window={date_window}）...')
+    print(f'   URL: {douhot_url}')
+    result = cdp_navigate(douhot_url)
     print(f'   导航结果: {result}')
     wait_for_load(8)
 
@@ -395,6 +439,65 @@ def main():
     print('\n[Step 4] 等待页面稳定...')
     wait_for_load(8)
 
+    # 4b. 检查登录状态
+    ws_url = get_target_ws_url('douhot')
+    check_login_js = """
+    (function() {
+        var body = document.body.textContent || '';
+        if (body.includes('使用抖音账号登录') || body.includes('扫一扫') || body.includes('申请使用')) {
+            return 'LOGIN_REQUIRED';
+        }
+        var rows = document.querySelectorAll('tr');
+        var validRows = 0;
+        for (var row of rows) {
+            var firstTd = row.querySelector('td');
+            if (!firstTd) continue;
+            var txt = firstTd.textContent.trim();
+            if (txt === '' || /^\d+$/.test(txt)) validRows++;
+        }
+        return validRows > 0 ? 'OK:' + validRows : 'NO_DATA';
+    })()
+    """
+    try:
+        result = asyncio.run(_cdp_send_raw(ws_url, 'Runtime.evaluate',
+                                           {'expression': check_login_js, 'returnByValue': True}))
+        status = result.get('result', {}).get('result', {}).get('value', 'UNKNOWN')
+    except Exception as e:
+        status = 'UNKNOWN'
+
+    if status == 'LOGIN_REQUIRED':
+        print('\n⚠️ 检测到登录页，请扫码登录 (等待最多60秒)...')
+        ss_path = '/tmp/douhot_login.png'
+        try:
+            result2 = asyncio.run(_cdp_send_raw(ws_url, 'Page.captureScreenshot',
+                                                {'format': 'png'}, timeout=30))
+            import base64
+            if 'result' in result2 and 'data' in result2['result']:
+                with open(ss_path, 'wb') as f:
+                    f.write(base64.b64decode(result2['result']['data']))
+                print(f'   📸 登录页截图已保存: {ss_path}')
+        except Exception as e:
+            print(f'   截图失败: {e}')
+        # 等待登录，每5秒检查一次，最多60秒
+        for i in range(12):
+            time.sleep(5)
+            try:
+                result3 = asyncio.run(_cdp_send_raw(ws_url, 'Runtime.evaluate',
+                                                    {'expression': check_login_js, 'returnByValue': True}))
+                new_status = result3.get('result', {}).get('result', {}).get('value', 'UNKNOWN')
+                if new_status != 'LOGIN_REQUIRED':
+                    print(f'   ✅ 登录完成 (等待了 {(i+1)*5} 秒)')
+                    break
+                print(f'   ⏳ 等待登录中... ({(i+1)*5}/60秒)')
+            except Exception as e:
+                print(f'   ⏳ 检查登录状态失败: {e}')
+        else:
+            print('   ❌ 等待登录超时，浏览器保持运行，请扫码后重新运行脚本')
+            print('   (不要关浏览器，直接用抖音APP扫码，然后再次运行 hot_trending.py)')
+            sys.exit(1)
+    elif status.startswith('NO_DATA') or status == 'UNKNOWN':
+        print(f'\n⚠️ 页面可能无数据或加载异常 (status={status})，继续观察...')
+
     # 5. 收集前 10 条视频的链接
     print(f'\n[Step 7] 收集前 {MAX_VIDEOS} 条视频链接...')
 
@@ -404,6 +507,33 @@ def main():
     # 正式开始采集前，先确保表格加载好（最多刷新5次）
     print(f'\n[Step 7a] 检查表格是否加载...')
     table_count = check_table_exists(ws_url)
+
+    # 如果24小时无数据，切换到1小时
+    if table_count == 0:
+        print(f'   ⚠️ date_window={date_window} 无数据，切换到 {DOUHOT_URL_FALLBACK} 小时...')
+        date_window = DOUHOT_URL_FALLBACK
+        douhot_url = build_douhot_url(date_window)
+        # 重新导航到新 URL
+        for _ in range(5):
+            pages = get_pages()
+            for p in pages:
+                if 'douhot' in p.get('url', ''):
+                    ws_url = p.get('webSocketDebuggerUrl')
+                    break
+            if ws_url:
+                break
+            wait_for_load(2)
+        if ws_url:
+            try:
+                asyncio.run(_cdp_send_raw(ws_url, 'Page.navigate', {'url': douhot_url}))
+                wait_for_load(8)
+            except Exception as e:
+                print(f'   ⚠️ 导航到备用URL失败: {e}')
+        ws_url = get_target_ws_url('douhot')
+        table_count = check_table_exists(ws_url)
+        if table_count > 0:
+            print(f'   ✅ date_window={date_window} 成功加载 {table_count} 行')
+
     if table_count == 0:
         print(f'   ⚠️ 未识别到表格，尝试刷新页面（最多5次）...')
         for retry in range(5):
@@ -418,6 +548,13 @@ def main():
                 break
         if table_count == 0:
             print('   ❌ 刷新5次后仍未识别到表格，退出脚本')
+            # 出问题了，截图留存
+            try:
+                ss_path = '/tmp/douhot_fail.png'
+                asyncio.run(_cdp_screenshot(ss_path))
+                print(f'   📸 已截图: {ss_path}')
+            except:
+                pass
             close_browser()
             sys.exit(1)
     print(f'   ✅ 表格已加载，共 {table_count} 行')
@@ -508,7 +645,7 @@ def main():
             if pages:
                 recovery_ws = pages[-1].get('webSocketDebuggerUrl')
                 if recovery_ws:
-                    asyncio.run(_cdp_send_raw(recovery_ws, 'Page.navigate', {'url': DOUHOT_URL}))
+                    asyncio.run(_cdp_send_raw(recovery_ws, 'Page.navigate', {'url': build_douhot_url(date_window)}))
             wait_for_load(8)
             ws_url = get_target_ws_url('douhot')
             if ws_url:
@@ -527,8 +664,8 @@ def main():
     close_all_tabs()
     close_browser()
 
-    # 9. 批量调用 analyze_video.py 分析收集到的视频
-    print(f'\n[Step 9] 批量分析 {len(video_urls)} 个视频...')
+    # 9. 逐个分析并实时保存
+    print(f'\n[Step 9] 逐个分析 {len(video_urls)} 个视频（分析完立即保存）...')
 
     processed = 0
     for idx, url in enumerate(video_urls, 1):
@@ -541,22 +678,34 @@ def main():
             continue
 
         analyze_script = os.path.join(ANALYZE_SCRIPT_DIR, 'analyze_video.py')
+        cmd = ['python3', analyze_script, url]
+        if headed:
+            cmd.append('--test')
         try:
             result = subprocess.run(
-                ['python3', analyze_script, url],
+                cmd,
                 capture_output=True, text=True, timeout=120
             )
+            if result.stdout:
+                for line in result.stdout.splitlines():
+                    print(f'   {line}')
+            if result.stderr:
+                for line in result.stderr.splitlines():
+                    print(f'   {line}')
             if result.returncode == 0:
                 print('   ✅ 分析完成')
                 processed += 1
             else:
-                print(f'   ⚠️ 分析失败: {result.stderr[:200] if result.stderr else result.stdout[:200]}')
+                print(f'   ⚠️ 分析失败 (exit {result.returncode})')
         except subprocess.TimeoutExpired:
             print('   ⚠️ 分析超时')
         except Exception as e:
             print(f'   ⚠️ 调用异常: {e}')
 
         wait_for_load(2)
+
+        # 每分析完一条就打印进度（保存由 analyze_video.py 自行完成）
+        print(f'   📊 进度: {idx}/{len(video_urls)}')
 
     # 9. 清理过期数据
     print('\n[Step 10] 清理过期数据...')
