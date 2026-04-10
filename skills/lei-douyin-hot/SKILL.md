@@ -52,6 +52,20 @@ python3 ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/check_douyin_hot.py
 python3 ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/hot_trending.py
 ```
 
+### 测试模式（调试用）
+
+调试时可使用测试模式（有头浏览器），方便观察页面操作：
+
+```bash
+# 方式1：启动 Chrome 时指定 test 参数
+bash ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/start_douyin.sh test
+
+# 方式2：运行爬取时指定 --headed 参数
+python3 ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/hot_trending.py --headed
+```
+
+正常运行时两个脚本都使用无头模式（xvfb-run），避免被检测。
+
 ## 工作流程
 
 ```

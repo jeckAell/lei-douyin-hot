@@ -23,6 +23,23 @@
 | `analyze_video.py` | 视频详情分析（需配合 hot_trending.py 使用） |
 | `cleanup_old_data.py` | 清理3天前的旧数据 |
 
+## 测试模式
+
+调试时可使用测试模式（有头浏览器），方便观察页面操作：
+
+```bash
+# 方式1：启动 Chrome 时指定 test 参数
+bash ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/start_douyin.sh test
+
+# 方式2：运行爬取时指定 --headed 参数
+python3 ~/.openclaw/workspace/skills/lei-douyin-hot/scripts/hot_trending.py --headed
+```
+
+- `start_douyin.sh test`：启动有头浏览器（可见 Chrome 窗口）
+- `hot_trending.py --headed`：跳过 xvfb-run，直接用有头浏览器运行
+
+正常运行时两个脚本都使用无头模式（xvfb-run），避免被检测。
+
 ## 使用前提
 
 1. Chrome 能正常启动（ms-playwright 版本）
